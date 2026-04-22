@@ -150,11 +150,27 @@ function getReplacementInfo(agentCode, dateStr) {
     
     // Cas 1: L'agent est un joker - voir qui il remplace
     if (agent && agent.groupe === 'J') {
-        for (const [otherCode, dates] of Object.entries(planningData[monthKey] || {})) {
-            const entry = dates?.[dateStr];
-            if (entry && entry.type === 'remplacement_joker' && entry.comment && entry.comment.includes(agentCode)) {
-                const match = entry.comment.match(/Remplace (\w+)/);
-                if (match) return { type: 'remplace', agent: match[1] };
+        // Parcourir tous les agents pour voir qui est remplacé par ce joker
+        for (const otherAgent of agents) {
+            if (otherAgent.groupe === 'J') continue;
+            const entry = planningData[monthKey]?.[otherAgent.code]?.[dateStr];
+            // Vérifier si l'agent a une absence et si le joker est mentionné
+            if (entry && ['C', 'M', 'A'].includes(entry.shift)) {
+                // Chercher dans les notifications
+                const notification = replacementNotifications.find(n => 
+                    n.agent_absent === otherAgent.code && 
+                    n.joker === agentCode &&
+                    n.date_debut <= dateStr && 
+                    n.date_fin >= dateStr
+                );
+                if (notification) {
+                    return { type: 'remplace', agent: otherAgent.code };
+                }
+                // Chercher dans le planningData si le joker a une entrée de remplacement
+                const jokerEntry = planningData[monthKey]?.[agentCode]?.[dateStr];
+                if (jokerEntry && jokerEntry.type === 'remplacement_joker' && jokerEntry.comment && jokerEntry.comment.includes(otherAgent.code)) {
+                    return { type: 'remplace', agent: otherAgent.code };
+                }
             }
         }
         return null;
@@ -162,8 +178,18 @@ function getReplacementInfo(agentCode, dateStr) {
     
     // Cas 2: L'agent est remplacé par un joker
     for (const joker of agents.filter(a => a.groupe === 'J')) {
-        const entry = planningData[monthKey]?.[joker.code]?.[dateStr];
-        if (entry && entry.type === 'remplacement_joker' && entry.comment && entry.comment.includes(agentCode)) {
+        const jokerEntry = planningData[monthKey]?.[joker.code]?.[dateStr];
+        if (jokerEntry && jokerEntry.type === 'remplacement_joker' && jokerEntry.comment && jokerEntry.comment.includes(agentCode)) {
+            return { type: 'remplace_par', agent: joker.code };
+        }
+        // Chercher dans les notifications
+        const notification = replacementNotifications.find(n => 
+            n.agent_absent === agentCode && 
+            n.joker === joker.code &&
+            n.date_debut <= dateStr && 
+            n.date_fin >= dateStr
+        );
+        if (notification) {
             return { type: 'remplace_par', agent: joker.code };
         }
     }
@@ -175,12 +201,21 @@ function getShiftDisplay(agentCode, dateStr) {
     const shift = getShiftForAgent(agentCode, dateStr);
     const replacement = getReplacementInfo(agentCode, dateStr);
     
-    if (replacement && replacement.type === 'remplace') {
-        return `${shift} 🔄 (Remplace ${replacement.agent})`;
+    // Cas 1: L'agent est un joker ET il remplace quelqu'un
+    const agent = agents.find(a => a.code === agentCode);
+    if (agent && agent.groupe === 'J' && replacement && replacement.type === 'remplace') {
+        const replacedAgent = agents.find(a => a.code === replacement.agent);
+        const agentName = replacedAgent ? `${replacedAgent.nom} ${replacedAgent.prenom}` : replacement.agent;
+        return `${shift} 🔄 Remplace ${agentName}`;
     }
+    
+    // Cas 2: L'agent est remplacé par un joker
     if (replacement && replacement.type === 'remplace_par') {
-        return `${shift} 🔄 (Remplacé par ${replacement.agent})`;
+        const jokerAgent = agents.find(a => a.code === replacement.agent);
+        const jokerName = jokerAgent ? `${jokerAgent.nom} ${jokerAgent.prenom}` : replacement.agent;
+        return `${shift} 🔄 Remplacé par ${jokerName}`;
     }
+    
     return shift;
 }
 
@@ -2447,47 +2482,64 @@ function showGlobalPlanningWithTotals(month, year, groupFilter = 'ALL') {
 function showGroupPlanningForm() {
     const currentYear = new Date().getFullYear();
     const currentMonth = new Date().getMonth() + 1;
-    let groups = ['A','B','C','D','E','J'];
-    if (currentUser.role === 'CP') groups = [currentUser.groupe];
+    let groups = ['A', 'B', 'C', 'D', 'E', 'J'];
+    if (currentUser.role === 'CP') groups = [currentUser.groupe, 'J'];
     
     const html = `<div class="info-section"><h3>👥 Planning par Groupe</h3>
-        <div class="form-group"><label>Groupe</label><select id="groupPlanGroup" class="form-input">${groups.map(g=>`<option value="${g}">Groupe ${g}</option>`).join('')}</select></div>
-        <div class="form-group"><label>Mois</label><select id="groupPlanMonth" class="form-input">${Array.from({length:12},(_,i)=>`<option value="${i+1}" ${i+1===currentMonth?'selected':''}>${MOIS_FRANCAIS[i]}</option>`).join('')}</select></div>
-        <div class="form-group"><label>Année</label><input type="number" id="groupPlanYear" class="form-input" value="${currentYear}"></div>
+        <div class="form-group"><label>Groupe</label>
+            <select id="groupPlanGroup" class="form-input">
+                ${groups.map(g => `<option value="${g}">${g === 'J' ? '🃏 Jokers' : '👥 Groupe ' + g}</option>`).join('')}
+            </select>
+        </div>
+        <div class="form-group"><label>Mois</label>
+            <select id="groupPlanMonth" class="form-input">
+                ${Array.from({length:12}, (_,i) => `<option value="${i+1}" ${i+1 === currentMonth ? 'selected' : ''}>${MOIS_FRANCAIS[i]}</option>`).join('')}
+            </select>
+        </div>
+        <div class="form-group"><label>Année</label>
+            <input type="number" id="groupPlanYear" class="form-input" value="${currentYear}">
+        </div>
         <button class="popup-button green" onclick="executeGroupPlanning()">📋 Voir</button>
         <button class="popup-button gray" onclick="displayPlanningMenu()">Annuler</button>
     </div>`;
     document.getElementById('main-content').innerHTML = html;
 }
-
 function executeGroupPlanning() {
     const group = document.getElementById('groupPlanGroup').value;
     const month = parseInt(document.getElementById('groupPlanMonth').value);
     const year = parseInt(document.getElementById('groupPlanYear').value);
     
-    if (!canAccessGroup(group)) {
-        alert("⚠️ Vous n'avez pas accès à ce groupe");
-        return;
-    }
     showGroupPlanningWithTotals(group, month, year);
 }
 
 function showGroupPlanningWithTotals(group, month, year) {
-    const groupAgents = agents.filter(a => a.groupe === group && a.statut === 'actif');
-    if (!groupAgents.length) { alert(`⚠️ Aucun agent dans groupe ${group}`); return; }
+    let groupAgents;
+    if (group === 'J') {
+        groupAgents = agents.filter(a => a.groupe === 'J' && a.statut === 'actif');
+    } else {
+        groupAgents = agents.filter(a => a.groupe === group && a.statut === 'actif');
+    }
+    
+    if (!groupAgents.length) { 
+        alert(`⚠️ Aucun agent dans ${group === 'J' ? 'les jokers' : 'le groupe ' + group}`); 
+        return; 
+    }
     
     const daysInMonth = new Date(year, month, 0).getDate();
-    let html = `<div class="info-section"><h3>📅 Planning Groupe ${group} - ${getMonthName(month)} ${year}</h3>
+    let title = `📅 Planning ${group === 'J' ? 'des Jokers' : 'Groupe ' + group} - ${getMonthName(month)} ${year}`;
+    
+    let html = `<div class="info-section"><h3>${title}</h3>
         <div style="overflow-x:auto;"><table class="planning-table" style="width:100%; border-collapse:collapse;">
         ${generatePlanningHeader(daysInMonth, month, year)}
         <tbody>`;
     
-    for(const agent of groupAgents) {
+    for (const agent of groupAgents) {
         const stats = calculateAgentStats(agent.code, month, year);
-        html += `<tr><td style="padding:6px;"><strong>${agent.code}</strong><br>${agent.nom} ${agent.prenom}</td>
-                <td style="text-align:center; padding:6px;">${agent.groupe}</td>`;
+        html += `<tr style="border-bottom:1px solid #34495e;">
+            <td style="padding:6px;"><strong>${agent.code}</strong><br>${agent.nom} ${agent.prenom}</th>
+            <td style="text-align:center; padding:6px;">${agent.groupe}</th>`;
         
-        for(let d=1; d<=daysInMonth; d++) {
+        for (let d = 1; d <= daysInMonth; d++) {
             const dateStr = `${year}-${month.toString().padStart(2,'0')}-${d.toString().padStart(2,'0')}`;
             const date = new Date(year, month-1, d);
             const shiftDisplay = getShiftDisplay(agent.code, dateStr);
@@ -2495,17 +2547,17 @@ function showGroupPlanningWithTotals(group, month, year) {
             const color = SHIFT_COLORS[shift] || '#7f8c8d';
             const isHoliday = isHolidayDate(date);
             let additionalStyle = '';
-            if(isHoliday && (shift === '1' || shift === '2' || shift === '3')) additionalStyle = 'border: 2px solid #f39c12;';
-            html += `<td style="background-color:${color}; color:white; text-align:center; padding:4px; ${additionalStyle}" title="${shiftDisplay}">${shiftDisplay}</td>`;
+            if (isHoliday && (shift === '1' || shift === '2' || shift === '3')) additionalStyle = 'border: 2px solid #f39c12;';
+            html += `<td style="background-color:${color}; color:white; text-align:center; padding:4px; ${additionalStyle}" title="${shiftDisplay}">${shiftDisplay}</th>`;
         }
         
-        html += `<td style="text-align:center; font-weight:bold; color:#27ae60; padding:6px;">${stats.travaillesNormaux}</td>
-                 <td style="text-align:center; font-weight:bold; color:#f39c12; padding:6px;">${stats.conges}</td>
-                 <td style="text-align:center; font-weight:bold; color:#e67e22; padding:6px;">${stats.feriesTravailles}</td>
-                 <td style="text-align:center; font-weight:bold; background:#2c3e50; color:#f1c40f; padding:6px;">${stats.totalGeneral}</td>
+        html += `<td style="text-align:center; font-weight:bold; color:#27ae60; padding:6px;">${stats.travaillesNormaux}</th>
+                 <td style="text-align:center; font-weight:bold; color:#f39c12; padding:6px;">${stats.conges}</th>
+                 <td style="text-align:center; font-weight:bold; color:#e67e22; padding:6px;">${stats.feriesTravailles}</th>
+                 <td style="text-align:center; font-weight:bold; background:#2c3e50; color:#f1c40f; padding:6px;">${stats.totalGeneral}</th>
                 </tr>`;
     }
-    html += `</tbody><tr></div>
+    html += `</tbody></table></div>
             <button class="popup-button gray" onclick="displayPlanningMenu()" style="margin-top:15px;">↩️ Retour</button>
         </div>`;
     document.getElementById('main-content').innerHTML = html;
